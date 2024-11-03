@@ -1,0 +1,1 @@
+# Rusty Token - JWT Vulnerability Scanner
