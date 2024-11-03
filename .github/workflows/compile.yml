@@ -1,0 +1,96 @@
+name: Rust Cross-Compile
+
+on: [push, pull_request]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - name: Cache Cargo
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Add target
+        run: rustup target add x86_64-unknown-linux-gnu
+      - name: Build
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+      - name: Prepare artifact
+        run: |
+          mkdir -p artifact
+          cp target/x86_64-unknown-linux-gnu/release/rusty_token artifact/
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: rusty_token_linux_x64
+          path: artifact
+
+  build-windows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - name: Cache Cargo
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install mingw-w64
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - name: Add target
+        run: rustup target add x86_64-pc-windows-gnu
+      - name: Build
+        run: cargo build --release --target x86_64-pc-windows-gnu
+      - name: Prepare artifact
+        run: |
+          mkdir -p artifact
+          cp target/x86_64-pc-windows-gnu/release/rusty_token.exe artifact/
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: rusty_token_windows_x64
+          path: artifact
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - name: Cache Cargo
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Add target
+        run: rustup target add x86_64-apple-darwin
+      - name: Build
+        run: cargo build --release --target x86_64-apple-darwin
+      - name: Prepare artifact
+        run: |
+          mkdir -p artifact
+          cp target/x86_64-apple-darwin/release/rusty_token artifact/
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: rusty_token_macos_x64
+          path: artifact
