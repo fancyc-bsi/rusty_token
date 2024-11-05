@@ -3,6 +3,7 @@ baseurl: "/rusty_token"
 permalink: pretty
 markdown: kramdown
 theme: just-the-docs
+color_scheme: dark
 
 # Plugins
 plugins:
@@ -14,4 +15,4 @@ just_the_docs:
     "Source on GitHub": "https://github.com/fancyc-bsi/rusty_token"
   search_enabled: true
   search_label: 'Search the docs...'
-  theme: dark
+  color_scheme: dark
