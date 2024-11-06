@@ -1,11 +1,11 @@
-use constants::{COMMON_HEADERS, COMMON_PAYLOADS, JWKS_COMMON, JWT_COMMON};
+use constants::{COMMON_HEADERS, COMMON_PAYLOADS, JWT_COMMON};
 use crate::{error::JWTAnalyzerError, jwt_exploiter::JWTExploiter, types::{ExploitResult, Vulnerability}};
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use rayon::prelude::*;
 use serde_json::Value;
 use types::{AttackExample, Claims, Severity};
 use std::sync::Arc;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use colored::*;
 use serde_json::json;
 use std::fmt;
@@ -52,7 +52,7 @@ impl fmt::Display for Severity {
 pub struct JWTAnalyzer {
     common_headers: Vec<String>,
     common_payloads: Vec<String>,
-    jwks_common: Vec<String>,
+    // jwks_common: Vec<String>,
     jwt_common: Vec<String>,
 }
 
@@ -61,7 +61,7 @@ impl JWTAnalyzer {
         JWTAnalyzer {
             common_headers: COMMON_HEADERS.lines().map(String::from).collect(),
             common_payloads: COMMON_PAYLOADS.lines().map(String::from).collect(),
-            jwks_common: JWKS_COMMON.lines().map(String::from).collect(),
+            // jwks_common: JWKS_COMMON.lines().map(String::from).collect(),
             jwt_common: JWT_COMMON.lines().map(String::from).collect(),
         }
     }
@@ -84,6 +84,12 @@ impl JWTAnalyzer {
         all_vulnerabilities.extend(self.check_kid_injection(&header).await?);
         all_vulnerabilities.extend(self.check_jwk_vulnerability(&header).await?);
 
+        all_vulnerabilities.extend(self.check_expired_token(&payload).await?);
+        all_vulnerabilities.extend(self.check_blank_password(&payload).await?);
+        all_vulnerabilities.extend(self.check_missing_claims(&payload).await?);
+        all_vulnerabilities.extend(self.check_algorithm_case(&header).await?);
+        all_vulnerabilities.extend(self.check_large_payload(&payload).await?);
+
         let exploiter = Arc::new(JWTExploiter::new(
             token,
             header.clone(),
@@ -98,8 +104,7 @@ impl JWTAnalyzer {
     
 
     fn decode_timestamp(timestamp: usize) -> String {
-        let naive = chrono::NaiveDateTime::from_timestamp(timestamp as i64, 0);
-        let utc: chrono::DateTime<Utc> = chrono::DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc);
+        let utc: DateTime<Utc> = DateTime::from_timestamp(timestamp as i64, 0).expect("Invalid timestamp");
         utc.format("%Y-%m-%d %H:%M:%S (UTC)").to_string()
     }
     
@@ -124,6 +129,202 @@ impl JWTAnalyzer {
         
         serde_json::from_str(&payload_str)
             .map_err(|_| JWTAnalyzerError::InvalidFormat)
+    }
+
+
+    async fn check_expired_token(&self, payload: &serde_json::Value) -> Result<Vec<Vulnerability>, JWTAnalyzerError> {
+        let mut vulnerabilities = Vec::new();
+
+        if let Some(exp) = payload.get("exp") {
+            if let Some(exp_time) = exp.as_i64() {
+                let current_time = chrono::Utc::now().timestamp();
+                if exp_time < current_time {
+                    vulnerabilities.push(Vulnerability {
+                        severity: Severity::Medium,
+                        description: "Expired token".to_string(),
+                        impact: "Expired tokens can still be used for access if not properly invalidated".to_string(),
+                        mitigation: "Implement proper token revocation mechanisms. Use shorter token lifetimes.".to_string(),
+                        attack_example: Some(AttackExample {
+                            description: "Using an expired token for access".to_string(),
+                            payload: r#"{
+    "typ": "JWT",
+    "alg": "HS256"
+}
+{
+    "sub": "user123",
+    "exp": 1623600000 // Expired timestamp
+}"#.to_string(),
+                            exploitation_steps: vec![
+                                "1. Obtain a valid but expired JWT".to_string(),
+                                "2. Attempt to use the expired token for access".to_string(),
+                                "3. If the application does not properly validate token expiration, the request may be accepted".to_string(),
+                                "4. Attacker gains unauthorized access".to_string(),
+                            ],
+                        }),
+                    });
+                }
+            }
+        } else {
+            vulnerabilities.push(Vulnerability {
+                severity: Severity::Medium,
+                description: "Missing expiration claim".to_string(),
+                impact: "Tokens without expiration can be used indefinitely, even after user privileges have been revoked".to_string(),
+                mitigation: "Always include an 'exp' claim to limit token lifetime".to_string(),
+                attack_example: Some(AttackExample {
+                    description: "Persistent access using non-expiring token".to_string(),
+                    payload: r#"{
+    "typ": "JWT",
+    "alg": "HS256"
+}
+{
+    "sub": "user123",
+    "role": "admin"
+    // Note: No 'exp' claim
+}"#.to_string(),
+                    exploitation_steps: vec![
+                        "1. Obtain a valid JWT without expiration".to_string(),
+                        "2. Token remains valid indefinitely".to_string(),
+                        "3. Can be used for access even after user privileges should have been revoked".to_string(),
+                        "4. Token must be explicitly blacklisted to prevent access".to_string(),
+                    ],
+                }),
+            });
+        }
+
+        Ok(vulnerabilities)
+    }
+
+    async fn check_blank_password(&self, payload: &serde_json::Value) -> Result<Vec<Vulnerability>, JWTAnalyzerError> {
+        let mut vulnerabilities = Vec::new();
+
+        if let Some(pwd) = payload.get("pwd") {
+            if pwd.as_str() == Some("") {
+                vulnerabilities.push(Vulnerability {
+                    severity: Severity::Medium,
+                    description: "Blank password in token".to_string(),
+                    impact: "Tokens with no password hash can be used to authenticate as any user".to_string(),
+                    mitigation: "Ensure password hashes are properly included in the token payload".to_string(),
+                    attack_example: Some(AttackExample {
+                        description: "Authenticating with a token containing a blank password".to_string(),
+                        payload: r#"{
+    "typ": "JWT",
+    "alg": "HS256"
+}
+{
+    "sub": "user123",
+    "pwd": ""
+}"#.to_string(),
+                        exploitation_steps: vec![
+                            "1. Obtain a valid JWT with a blank password field".to_string(),
+                            "2. Use the token to authenticate as the user".to_string(),
+                            "3. Attacker gains unauthorized access".to_string(),
+                        ],
+                    }),
+                });
+            }
+        }
+
+        Ok(vulnerabilities)
+    }
+
+    async fn check_missing_claims(&self, payload: &serde_json::Value) -> Result<Vec<Vulnerability>, JWTAnalyzerError> {
+        let mut vulnerabilities = Vec::new();
+
+        let required_claims = ["iat", "nbf", "jti"];
+        for claim in required_claims {
+            if !payload.get(claim).is_some() {
+                vulnerabilities.push(Vulnerability {
+                    severity: Severity::Low,
+                    description: format!("Missing '{}' claim", claim),
+                    impact: "Tokens without recommended security claims are less secure".to_string(),
+                    mitigation: format!("Include the '{}' claim in the token payload", claim),
+                    attack_example: Some(AttackExample {
+                        description: format!("Token missing the '{}' claim", claim),
+                        payload: r#"{
+    "typ": "JWT",
+    "alg": "HS256"
+}
+{
+    "sub": "user123"
+    // Note: No '{}' claim
+}"#.replace("{}", claim),
+                        exploitation_steps: vec![
+                            format!("1. Obtain a token that is missing the '{}' claim", claim),
+                            "2. The token is less secure due to the missing claim".to_string(),
+                            "3. Potential for increased attack surface".to_string(),
+                        ],
+                    }),
+                });
+            }
+        }
+
+        Ok(vulnerabilities)
+    }
+
+    async fn check_algorithm_case(&self, header: &serde_json::Value) -> Result<Vec<Vulnerability>, JWTAnalyzerError> {
+        let mut vulnerabilities = Vec::new();
+
+        if let Some(alg) = header.get("alg").and_then(|a| a.as_str()) {
+            let expected_alg = alg.to_lowercase();
+            if alg != expected_alg {
+                vulnerabilities.push(Vulnerability {
+                    severity: Severity::Low,
+                    description: "Algorithm case sensitivity".to_string(),
+                    impact: "Inconsistent handling of algorithm case can lead to unexpected behavior".to_string(),
+                    mitigation: "Ensure case-insensitive comparison of the 'alg' header".to_string(),
+                    attack_example: Some(AttackExample {
+                        description: "Modifying algorithm case in the header".to_string(),
+                        payload: format!(r#"{{
+    "typ": "JWT",
+    "alg": "{}"
+}}
+{{"sub": "user123"}}"#, alg.to_uppercase()),
+                        exploitation_steps: vec![
+                            "1. Obtain a valid JWT".to_string(),
+                            "2. Modify the 'alg' header to use a different case".to_string(),
+                            "3. If the application does not handle the case consistently, the modified token may still be accepted".to_string(),
+                        ],
+                    }),
+                });
+            }
+        }
+
+        Ok(vulnerabilities)
+    }
+
+    async fn check_large_payload(&self, payload: &serde_json::Value) -> Result<Vec<Vulnerability>, JWTAnalyzerError> {
+        let mut vulnerabilities = Vec::new();
+
+        // Estimate the size of the payload
+        let payload_size = serde_json::to_string(payload)
+            .map_err(|e| JWTAnalyzerError::PayloadManipulation(e.to_string()))?.len();
+
+        if payload_size > 10240 { // 10 KB
+            vulnerabilities.push(Vulnerability {
+                severity: Severity::Low,
+                description: "Large token payload".to_string(),
+                impact: "Excessive payload size can lead to performance issues and potential denial of service".to_string(),
+                mitigation: "Limit the size of the token payload to the minimum required".to_string(),
+                attack_example: Some(AttackExample {
+                    description: "Crafting a token with a large payload".to_string(),
+                    payload: r#"{
+    "typ": "JWT",
+    "alg": "HS256"
+}
+{
+    "sub": "user123",
+    "padding": "A".repeat(50000)
+}"#.to_string(),
+                    exploitation_steps: vec![
+                        "1. Generate a JWT with a very large payload".to_string(),
+                        "2. Attempt to use the token for authentication".to_string(),
+                        "3. If the application does not properly handle large payloads, it may lead to performance issues or denial of service".to_string(),
+                    ],
+                }),
+            });
+        }
+
+        Ok(vulnerabilities)
     }
 
     async fn check_algorithm_vulnerabilities(&self, header: &Value) -> Result<Vec<Vulnerability>, JWTAnalyzerError> {
@@ -345,12 +546,20 @@ impl JWTAnalyzer {
     async fn check_signature_stripping(&self, token: &str) -> Result<Vec<Vulnerability>, JWTAnalyzerError> {
         let mut vulnerabilities = Vec::new();
         
+        // Split the token into its parts
+        let parts: Vec<&str> = token.split('.').collect();
+        if parts.len() < 3 {
+            return Ok(vulnerabilities); // No valid token structure to strip signature
+        }
+    
+        // Create variants by stripping signature in various ways
         let variants = vec![
-            format!("{}..", token),
-            format!("{}.", token),
-            token.replace(token.split('.').last().unwrap_or(""), ""),
+            format!("{}.{}", parts[0], parts[1]),  // Remove the signature (third part)
+            format!("{}..", token),                // Remove the signature, leaving two dots
+            format!("{}.", token),                 // Remove the signature and the last dot
         ];
-
+    
+        // Check each variant for vulnerability
         for variant in variants {
             if self.verify_token_accepted(&variant).await {
                 vulnerabilities.push(Vulnerability {
@@ -361,12 +570,12 @@ impl JWTAnalyzer {
                     attack_example: Some(AttackExample {
                         description: "Signature removal attack".to_string(),
                         payload: r#"// Original token:
-header.payload.signature
-
-// Attack variants:
-header.payload..
-header.payload.
-header.payload"#.to_string(),
+    header.payload.signature
+    
+    // Attack variants:
+    header.payload..
+    header.payload.
+    header.payload"#.to_string(),
                         exploitation_steps: vec![
                             "1. Start with a valid JWT token".to_string(),
                             "2. Try multiple signature stripping variants:".to_string(),
@@ -378,12 +587,13 @@ header.payload"#.to_string(),
                         ],
                     }),
                 });
-                break;
+                break; // No need to check further once the vulnerability is found
             }
         }
-
+    
         Ok(vulnerabilities)
     }
+
 
     async fn check_jwk_vulnerability(&self, header: &Value) -> Result<Vec<Vulnerability>, JWTAnalyzerError> {
         let mut vulnerabilities = Vec::new();
@@ -442,6 +652,10 @@ header.payload"#.to_string(),
             None => return Err(JWTAnalyzerError::InvalidFormat),
         };
     
+        if algorithm == "none" {
+            return Ok(Some("none".to_string()));
+        }
+    
         let found_secret = self.jwt_common.par_iter().find_map_any(|secret| {
             // Determine the algorithm for validation
             let algorithm_enum = match algorithm {
@@ -451,7 +665,6 @@ header.payload"#.to_string(),
                 "RS256" => Algorithm::RS256,
                 "RS384" => Algorithm::RS384,
                 "RS512" => Algorithm::RS512,
-                
                 _ => {
                     eprintln!("{}", format!("Unsupported algorithm: {}", algorithm).red());
                     return None;
@@ -509,7 +722,7 @@ header.payload"#.to_string(),
         report.push_str(&"\nToken payload values:\n".yellow());
 
         // Handle timestamp fields
-        for (field, label) in [("iat", "IssuedAt"), ("exp", "Expires"), ("nbf", "NotBefore")] {
+        for (field, _label) in [("iat", "IssuedAt"), ("exp", "Expires"), ("nbf", "NotBefore")] {
             if let Some(value) = payload.get(field) {
                 if let Some(timestamp) = value.as_u64() {
                     report.push_str(&format!("[+] {} = {}    ==> TIMESTAMP = {}\n", 
